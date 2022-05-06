@@ -1944,24 +1944,55 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
             # Sort added tokens by index
             added_tok_encoder_sorted = list(sorted(added_tok_encoder.items(), key=lambda x: x[1]))
 
+            # Accumulate added tokens into batches of special/non-special tokens
+            added_tok_batch_is_special = None
+            added_tok_batch_accumulator = []
+
+            def empty_accumulator() -> None:
+                if not added_tok_batch_accumulator:
+                    return
+
+                nonlocal added_tok_batch_is_special
+
+                assert added_tok_batch_is_special is not None
+
+                # Safe to call on a tokenizer fast even if token already there
+                tokenizer.add_tokens(added_tok_batch_accumulator, special_tokens=added_tok_batch_is_special)
+
+                # Create a new batch of tokens
+                added_tok_batch_is_special = None
+                added_tok_batch_accumulator.clear()
+
             for token, index in added_tok_encoder_sorted:
-                if has_tokenizer_file and index != len(tokenizer) and tokenizer.convert_tokens_to_ids(token) != index:
+                current_index = len(tokenizer) + len(added_tok_batch_accumulator)
+                if has_tokenizer_file and index != current_index and tokenizer.convert_tokens_to_ids(token) != index:
                     # Tokenizer fast: added token needs to either be in the vocabulary with the proper index or the
                     # index is the current length of the tokenizer (not in vocabulary)
                     raise ValueError(
                         f"Wrong index found for {token}: should be {tokenizer.convert_tokens_to_ids(token)} but found "
                         f"{index}."
                     )
-                elif not has_tokenizer_file and index != len(tokenizer):
+                elif not has_tokenizer_file and index != current_index:
                     # Tokenizer slow: added token cannot already be in the vocabulary so its index needs to be the
                     # current length of the tokenizer.
                     raise ValueError(
                         f"Non-consecutive added token '{token}' found. "
-                        f"Should have index {len(tokenizer)} but has index {index} in saved vocabulary."
+                        f"Should have index {current_index} but has index {index} in saved vocabulary."
                     )
 
-                # Safe to call on a tokenizer fast even if token already there.
-                tokenizer.add_tokens(token, special_tokens=bool(token in special_tokens))
+                token_is_special = bool(token in special_tokens)
+
+                # If previous token was special and this one is not or vise versa, add the current batch of tokens
+                # to the tokenizer and create a new batch of tokens
+                if added_tok_batch_is_special != token_is_special:
+                    empty_accumulator()
+
+                # Append the token to the current batch of tokens
+                added_tok_batch_is_special = token_is_special
+                added_tok_batch_accumulator.append(token)
+
+            # Add the last batch of tokens to the tokenizer
+            empty_accumulator()
 
         # Check all our special tokens are registered as "no split" token (we don't cut them) and are in the vocab
         added_tokens = tokenizer.sanitize_special_tokens()
